@@ -1,8 +1,13 @@
 extern crate core;
 
+mod checkpoint;
+#[cfg(all(test, feature = "native-checkpoint-integration"))]
+mod checkpoint_integration;
 mod database;
 mod indexer;
 mod models;
+#[cfg(all(test, feature = "native-chain-regtest"))]
+mod native_chain_regtest;
 mod ordinals;
 mod schema;
 mod util;
@@ -21,6 +26,25 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() {
+    // Inspection flags must return before dotenv, database connections or writer locks.
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments == ["--build-info"] {
+        println!(
+            "{}",
+            serde_json::json!({
+                "package": "ord20-indexer",
+                "repository": "LiteVerseHoldings/ord20-indexer",
+                "source_base_revision": option_env!("ORD20_SOURCE_REVISION").unwrap_or("unrecorded"),
+                "source_tree_sha256": option_env!("ORD20_SOURCE_TREE_SHA256").unwrap_or("unrecorded"),
+                "token_trade_checkpoint_version": 1
+            })
+        );
+        return;
+    }
+    if !arguments.is_empty() {
+        eprintln!("Unsupported argument; only --build-info is supported for read-only inspection");
+        exit(2);
+    }
     dotenv().ok();
     env_logger::init();
 
@@ -51,6 +75,11 @@ async fn main() {
         meta_protocol,
     };
 
+    if let Err(error) = indexer.initialize_checkpoint().await {
+        log::error!("Checkpoint initialization refused: {}", error);
+        exit(1);
+    }
+
     loop {
         let last_height = indexer
             .database
@@ -63,7 +92,10 @@ async fn main() {
 
         if let Ok(current_height) = indexer.ordinals.get_block_height().await {
             if last_height < current_height - blocks_behind {
-                indexer.get_blocks(current_height - blocks_behind).await;
+                if let Err(error) = indexer.get_blocks(current_height - blocks_behind).await {
+                    log::error!("Indexing stopped: {}", error);
+                    exit(1);
+                }
             }
         }
 

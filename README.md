@@ -1,3 +1,49 @@
+## Local token-trade checkpoint candidate - not deployed
+
+This candidate uses the organization repository at base commit
+`dfc23efe0dd95188b410dacc7cd407f88a89cf25`. The running server executable is
+confirmed to be the live Rust ord20 process, but carries no verifiable embedded
+repository revision. Its exact build provenance remains unproven. Do not treat
+this checkout as a certified byte-for-byte source match for that binary.
+
+A public-upstream prototype was used for comparison; this review candidate is
+based on the organization's source.
+This port preserves the organization's first-output genesis allocation and
+fee-recipient behavior. An isolated synthetic replay compares the original
+organization ledger against this candidate: balances, token trackers and transfer
+records agree; send history intentionally records the actual spending transaction,
+height and time instead of the inscription creation identity. This is not a full
+historical replay or proof of general consensus correctness.
+
+Each block commits its ledger mutations, last_height and canonical checkpoint in
+one PostgreSQL transaction. Reorgs, missing required previous-output metadata,
+SQL failures, gaps and panics refuse advancement. Bootstrap only permits an empty
+ledger at the reference activation boundary. A populated uncheckpointed ledger
+is refused; do not seed its marker manually or run this beside the old writer.
+Keep the production ledger and prior binary intact. Source verification and an
+audited independent replay remain release gates.
+
+The local integration command is `bash tests/run-isolated.sh` in a NEW isolated
+Linux container with PostgreSQL 15, PHP/PDO pgsql and Rust, this source copied to
+its work directory and the paired Litescribe checkout mounted read-only at
+`/consumer`. It creates only synthetic DB schemas on a Unix socket; no real wallet
+or production DB is involved. Test artifacts are retained.
+
+New candidate binaries accept `--build-info` before loading configuration or
+opening any database. The review build embeds its base revision and a SHA-256
+fingerprint of the exact application source and Cargo lockfile. An unrecorded
+build reports that explicitly. Never try this argument on the old production
+binary: its command-line behavior has not been verified as read-only.
+
+Actual wallet-signed SegWit and Taproot swaps passed Litecoin regtest acceptance,
+Ord delivery and exact native LTC-20 seller credit checks using the paired
+[Ord API candidate](https://github.com/LiteVerseHoldings/ord-litecoin/tree/api-15).
+The optional test-only `native-chain-regtest` feature consumes that disposable
+chain and its synthetic swap fixtures; it refuses mainnet and never produces a
+mainnet-ready checkpoint. Full historical mainnet replay/reconciliation, live
+build provenance and the hosted purchase flow with the packaged wallet remain
+release gates. Nothing was deployed, restarted or deleted by this work.
+
 <!-- PROJECT LOGO -->
 <div align="center">
   <h3 align="center">Ord20 Indexer (ord-20) library</h3>

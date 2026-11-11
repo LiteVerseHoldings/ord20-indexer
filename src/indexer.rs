@@ -1,3 +1,4 @@
+use crate::checkpoint::CheckResult;
 use crate::database::Database;
 use crate::models::{Inscriptions, Ord20};
 use crate::ordinals::{Block, Inscription, Ordinals};
@@ -5,24 +6,10 @@ use crate::util::{bigdecimal_fractional_count, string_to_timestamp};
 use crate::SHUTTING_DOWN;
 use bigdecimal::{BigDecimal, Zero};
 use hex::decode;
-use lazy_static::lazy_static;
 use std::convert::Into;
-use std::env;
 use std::string::ToString;
 use std::sync::atomic::Ordering;
-use std::sync::{mpsc, Arc};
 use std::time::Instant;
-use tokio::sync::Semaphore;
-
-lazy_static! {
-    static ref MAX_CONCURRENT_REQUESTS: usize = {
-        let max_concurrent_requests_str =
-            env::var("MAX_CONCURRENT_REQUESTS").unwrap_or("10".to_string());
-        max_concurrent_requests_str
-            .parse::<usize>()
-            .expect("MAX_CONCURRENT_REQUESTS must be a positive integer")
-    };
-}
 
 pub struct Indexer {
     pub ordinals: Ordinals,
@@ -31,157 +18,108 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    pub(crate) async fn get_blocks(&mut self, target_block: i32) {
-        let semaphore = Arc::new(Semaphore::new(*MAX_CONCURRENT_REQUESTS));
-        let (tx, rx) = mpsc::sync_channel::<_>(*MAX_CONCURRENT_REQUESTS * 2);
-        let status = self
-            .database
-            .get_status("last_height".to_string())
-            .unwrap()
-            .value;
-        let ordinals = self.ordinals.clone();
-        tokio::spawn(async move {
-            let mut last_height = status.unwrap().parse::<i32>().unwrap();
-
+    pub(crate) async fn get_blocks(&mut self, target_block: i32) -> CheckResult<()> {
+        loop {
+            let previous = self.read_checkpoint()?;
+            if previous.height >= target_block || SHUTTING_DOWN.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let block = self
+                .ordinals
+                .get_block(previous.height + 1)
+                .await
+                .map_err(|_| "Required block unavailable")?;
+            let started = Instant::now();
+            let count = self.commit_block(&block).await?;
             log::info!(
-                "Last Block Processed {}, Target Block {}",
-                last_height,
-                target_block
+                "Committed block {}, inscriptions {}, elapsed {:?}",
+                block.height,
+                count,
+                started.elapsed()
             );
-
-            while last_height < target_block {
-                let next_height = last_height + 1;
-                let mut ordinals = ordinals.clone();
-                let semaphore = Arc::clone(&semaphore);
-                let block_request = tokio::spawn(async move {
-                    let _permit = semaphore.acquire().await.unwrap();
-                    ordinals.get_block(next_height).await
-                });
-
-                last_height = next_height;
-
-                tx.send(block_request)
-                    .expect("Failed to send block to channel");
-
-                if SHUTTING_DOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        });
-
-        while let Ok(block_future) = rx.recv() {
-            match block_future.await {
-                Ok(block) => {
-                    let start_time = Instant::now();
-                    log::debug!("start_time: {:?}", start_time);
-
-                    let block_ref = block.as_ref();
-                    log::debug!("block_ref: {:?}", block_ref);
-
-                    let unwrapped_block = match block_ref {
-                        Ok(b) => b,
-                        Err(e) => {
-                          log::debug!("Error unwrapping block: {:?}", e);
-                          continue; // Skip this iteration due to unwrapping error
-                        }
-                    };
-
-                    log::debug!("unwrapped_block: {:?}", unwrapped_block);
-
-                    let processed = self.process_block(unwrapped_block).await;
-                    log::debug!("processed: {:?}", processed);
-
-                    let elapsed_time = start_time.elapsed();
-                    log::info!(
-                        "Block {}/{}, Timestamp: {}, Txs: {}, Inscriptions: {}, Time: {:?}",
-                        block.as_ref().unwrap().height,
-                        target_block,
-                        block.as_ref().unwrap().timestamp,
-                        block.as_ref().unwrap().transactions.len(),
-                        processed,
-                        elapsed_time
-                    );
-                    let _ = self.database.update_status(
-                        "last_height".to_string(),
-                        block.as_ref().unwrap().height.to_string(),
-                    );
-                }
-                Err(err) => {
-                    eprintln!("Error: {:?}", err);
-                }
-            }
         }
     }
 
-    pub(crate) async fn process_block(&mut self, block: &Block) -> i32 {
+    pub(crate) async fn process_block(&mut self, block: &Block) -> CheckResult<i32> {
         let mut inscriptions_count = 0;
         let mut block_miner_address = "";
         for txs in &block.transactions {
-            let (output, _output_value) = txs.outputs.first().unwrap();
+            if block_miner_address.is_empty() {
+                block_miner_address = txs
+                    .output_addresses
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("");
+            }
             let address = if !txs.output_addresses.is_empty() {
                 txs.output_addresses.first().unwrap()
             } else {
                 ""
             };
-            if block_miner_address.is_empty() {
-                if txs.output_addresses.first().is_some() {
-                    block_miner_address = txs.output_addresses.first().unwrap();
-                    log::debug!("Block Miner Address: {}", block_miner_address);
-                }
+            if txs.outputs.is_empty() || txs.outputs.len() != txs.output_addresses.len() {
+                return Err("Incomplete block transaction outputs".into());
             }
+            if txs
+                .outputs
+                .iter()
+                .try_fold(0u64, |sum, (_, value)| sum.checked_add(*value))
+                .is_none_or(|sum| sum > 8_400_000_000_000_000)
+            {
+                return Err("Invalid transaction output values".into());
+            }
+            string_to_timestamp(block.timestamp.as_str()).ok_or("Invalid block timestamp")?;
             let mut fetched_up_to_index = -1;
-            let mut input_offset = 0;
+            let mut input_offset = 0u64;
             for (index, (input, _input_value)) in txs.inputs.iter().enumerate() {
                 // Check inputs for transfer inscription
                 if let Ok(inscription) = self.database.get_inscription_by_output(input.to_string())
                 {
-                    if inscription.action.contains("transfer")
-                        && !inscription.spent.unwrap_or_default()
-                    {
+                    if inscription.action == "transfer" && !inscription.spent.unwrap_or_default() {
                         if index > 0 {
                             for backfill_index in (fetched_up_to_index + 1) as usize..index {
                                 let (backfill_input, _) = &txs.inputs[backfill_index];
 
-                                // Fetch the input_value from the database for this backfill input
-                                if let Ok(output) =
-                                    self.ordinals.get_output(backfill_input.to_string()).await
+                                let output = self.ordinals.get_output(backfill_input.to_string()).await
+                                    .map_err(|_| "Required prior input value unavailable; cannot locate transfer")?;
+                                if Some(output.transaction.as_str())
+                                    != backfill_input.split(':').next()
+                                    || output.value > 8_400_000_000_000_000
                                 {
-                                    log::info!(
-                                        "Get output for index {}:  {:?}",
-                                        backfill_input,
-                                        output
-                                    );
-                                    input_offset += output.value;
-                                    // Update fetched_up_to_index since we've now fetched this input_value
-                                    fetched_up_to_index = backfill_index as isize;
-                                } else {
-                                    log::error!(
-                                        "Failed to get output value for input: {}",
-                                        backfill_input.to_string()
-                                    );
+                                    return Err("Prior output identity or value is invalid".into());
                                 }
+                                input_offset = input_offset
+                                    .checked_add(output.value)
+                                    .ok_or("Input value overflow")?;
+                                fetched_up_to_index = backfill_index as isize;
                             }
                         }
 
                         let vout =
                             Indexer::calculate_ordinal_position(index, input_offset, &txs.outputs);
                         let address_receiver = if vout > txs.outputs.len() - 1 {
+                            // Preserve the organization's existing fee-recipient rule pending ledger audit.
                             block_miner_address
                         } else {
                             txs.output_addresses.get(vout).unwrap()
                         };
-                        if let Ok(transfer_inscription) = self.database.update_inscription_spent(
-                            inscription.id,
-                            inscription.genesis_address,
-                            address_receiver.to_string(),
-                            txs.transaction.clone(),
-                            0,
-                            block.height as i64,
-                            string_to_timestamp(block.timestamp.as_str()).unwrap_or(0),
-                        ) {
-                            if transfer_inscription.valid.unwrap_or_default() {
-                                self.process_inscription_transfer(&transfer_inscription);
-                            }
+                        if address_receiver.is_empty() {
+                            return Err("Transfer recipient unavailable".into());
+                        }
+                        let transfer_inscription = self
+                            .database
+                            .update_inscription_spent(
+                                inscription.id,
+                                inscription.genesis_address.clone(),
+                                address_receiver.to_string(),
+                                txs.transaction.clone(),
+                                0,
+                                block.height as i64,
+                                string_to_timestamp(block.timestamp.as_str())
+                                    .ok_or("Invalid block timestamp")?,
+                            )
+                            .map_err(|_| "Cannot record transfer spend")?;
+                        if transfer_inscription.valid.unwrap_or_default() {
+                            self.process_inscription_transfer(&transfer_inscription)?;
                         }
                     }
                 }
@@ -197,7 +135,7 @@ impl Indexer {
                     genesis_height: block.height as i64,
                     genesis_transaction: txs.transaction.clone(),
                     inscription_id: tx_inscription.inscription_id.clone(),
-                    output: output.to_string(),
+                    output: txs.outputs[0].0.clone(),
                     location: "".to_string(),
                     address: "".to_string(),
                     genesis_address: address.to_string(),
@@ -209,15 +147,19 @@ impl Indexer {
                     timestamp: block.timestamp.clone(),
                 };
                 if inscription.number > 0
-                    && inscription.content_type.as_ref().map_or(false, |ct| {
+                    && inscription.content_type.as_ref().is_some_and(|ct| {
                         ct.contains("text/plain") || ct.contains("application/json")
                     })
                 {
+                    let Some(content) = tx_inscription.content.as_ref() else {
+                        continue;
+                    };
+                    let Ok(decoded) = decode(content) else {
+                        continue;
+                    };
                     if let Some(inscription) = self.add_inscription(
                         inscription,
-                        decode(tx_inscription.content.clone().unwrap())
-                            .map(|s| String::from_utf8_lossy(s.as_slice()).into_owned())
-                            .unwrap(),
+                        String::from_utf8_lossy(&decoded).into_owned(),
                     ) {
                         log::debug!("Process Inscription: {:?}", inscription);
                         inscriptions_count += 1;
@@ -226,7 +168,7 @@ impl Indexer {
                 }
             }
         }
-        inscriptions_count
+        Ok(inscriptions_count)
     }
 
     pub(crate) fn calculate_ordinal_position(
@@ -260,7 +202,7 @@ impl Indexer {
         content: String,
     ) -> Option<Inscriptions> {
         if let Ok(ord20) = serde_json::from_str::<Ord20>(&content) {
-            if !ord20.p.contains(self.meta_protocol.as_str()) {
+            if ord20.p != self.meta_protocol {
                 return None;
             }
             let inscription_id = if inscription.inscription_id.is_empty() {
@@ -289,7 +231,7 @@ impl Indexer {
                 )
                 .ok();
         }
-        log::info!("Error processing content {}", content);
+
         None
     }
 
@@ -304,6 +246,7 @@ impl Indexer {
                     return;
                 }
 
+                #[allow(clippy::needless_as_bytes)]
                 if inscription.ticker.as_bytes().len() != 4 {
                     return;
                 }
@@ -455,98 +398,117 @@ impl Indexer {
         }
     }
 
-    pub(crate) fn process_inscription_transfer(&mut self, inscription: &Inscriptions) {
-        let amount = inscription.amount.clone().unwrap_or_default();
-
-        let mut receiver_balance_current = BigDecimal::zero();
-        let mut receiver_transfer_balance_current = BigDecimal::zero();
-
-        let mut holders_change = 0;
-
-        if let Ok(receiver_balance) = self.database.get_balance(
-            inscription.address_receiver.clone().unwrap(),
-            inscription.ticker.clone(),
-        ) {
-            if receiver_balance.balance.clone() == BigDecimal::zero()
-                && receiver_balance.transfer_balance.clone() == BigDecimal::zero()
-            {
-                holders_change = 1;
-            }
-
-            receiver_balance_current = receiver_balance.balance;
-            receiver_transfer_balance_current = receiver_balance.transfer_balance;
-        } else {
-            // If no existing entry exists then create a new one
-            let _ = self.database.create_balance(
-                inscription.address_receiver.clone().unwrap(),
-                inscription.ticker.clone(),
-            );
-            holders_change = 1;
+    pub(crate) fn process_inscription_transfer(
+        &mut self,
+        inscription: &Inscriptions,
+    ) -> CheckResult<()> {
+        use diesel::OptionalExtension;
+        let amount = inscription
+            .amount
+            .clone()
+            .ok_or("Missing transfer amount")?;
+        if amount <= BigDecimal::zero() {
+            return Err("Invalid transfer amount".into());
         }
-
-        if let Ok(sender_balance) = self.database.get_balance(
-            inscription.address_sender.clone().unwrap(),
-            inscription.ticker.clone(),
-        ) {
-            let sender_transfer_balance_new = sender_balance.transfer_balance - amount.clone();
-            let receiver_balance_new = receiver_balance_current + amount;
-
-            if sender_balance.balance.clone() == BigDecimal::zero()
-                && sender_transfer_balance_new.clone() == BigDecimal::zero()
+        let sender = inscription
+            .address_sender
+            .clone()
+            .ok_or("Missing transfer sender")?;
+        let receiver = inscription
+            .address_receiver
+            .clone()
+            .ok_or("Missing transfer recipient")?;
+        let sender_balance = self
+            .database
+            .get_balance(sender.clone(), inscription.ticker.clone())
+            .map_err(|_| "Transfer sender balance unavailable")?;
+        let tracker = self
+            .database
+            .get_tracker(inscription.ticker.clone())
+            .map_err(|_| "Transfer token unavailable")?;
+        if sender_balance.transfer_balance < amount {
+            return Err("Insufficient reserved transfer balance".into());
+        }
+        let prior_receiver = self
+            .database
+            .get_balance(receiver.clone(), inscription.ticker.clone())
+            .optional()
+            .map_err(|_| "Cannot read recipient balance")?;
+        let mut holders_change = 0;
+        let (receiver_balance, receiver_reserved) = if let Some(account) = prior_receiver {
+            if account.balance == BigDecimal::zero()
+                && account.transfer_balance == BigDecimal::zero()
             {
-                holders_change -= 1;
+                holders_change += 1;
             }
-
-            if inscription
-                .address_sender
-                .clone()
-                .unwrap()
-                .eq(&inscription.address_receiver.clone().unwrap())
-            {
-                let _ = self.database.update_balance(
-                    inscription.address_sender.clone().unwrap(),
+            (account.balance, account.transfer_balance)
+        } else {
+            self.database
+                .create_balance(receiver.clone(), inscription.ticker.clone())
+                .map_err(|_| "Cannot create recipient balance")?;
+            holders_change += 1;
+            (BigDecimal::zero(), BigDecimal::zero())
+        };
+        let remaining = sender_balance.transfer_balance - amount.clone();
+        if sender_balance.balance == BigDecimal::zero() && remaining == BigDecimal::zero() {
+            holders_change -= 1;
+        }
+        if sender == receiver {
+            // A self-send converts the reservation back into available balance.
+            holders_change = 0;
+            self.database
+                .update_balance(
+                    sender.clone(),
                     inscription.ticker.clone(),
-                    receiver_balance_new,
-                    sender_transfer_balance_new,
-                );
-            } else {
-                let _ = self.database.update_balance(
-                    inscription.address_sender.clone().unwrap(),
+                    receiver_balance + amount.clone(),
+                    remaining,
+                )
+                .map_err(|_| "Cannot update self transfer")?;
+        } else {
+            self.database
+                .update_balance(
+                    sender.clone(),
                     inscription.ticker.clone(),
                     sender_balance.balance,
-                    sender_transfer_balance_new,
-                );
-                let _ = self.database.update_balance(
-                    inscription.address_receiver.clone().unwrap(),
+                    remaining,
+                )
+                .map_err(|_| "Cannot debit transfer reservation")?;
+            self.database
+                .update_balance(
+                    receiver.clone(),
                     inscription.ticker.clone(),
-                    receiver_balance_new,
-                    receiver_transfer_balance_current,
-                );
-            }
-
-            if let Ok(tracker) = self.database.get_tracker(inscription.ticker.clone()) {
-                let _ = self
-                    .database
-                    .update_tracker_holders(tracker.id, tracker.holders + holders_change);
-                let _ = self
-                    .database
-                    .update_tracker_transactions(tracker.id, tracker.transactions + 1);
-            }
-
-            let _ = self.database.create_history(
-                inscription.address_sender.clone().unwrap(),
-                inscription.address_receiver.clone().unwrap(),
-                inscription.amount.clone().unwrap(),
+                    receiver_balance + amount.clone(),
+                    receiver_reserved,
+                )
+                .map_err(|_| "Cannot credit transfer recipient")?;
+        }
+        self.database
+            .update_tracker_holders(tracker.id, tracker.holders + holders_change)
+            .map_err(|_| "Cannot update holders")?;
+        self.database
+            .update_tracker_transactions(tracker.id, tracker.transactions + 1)
+            .map_err(|_| "Cannot update transfer count")?;
+        self.database
+            .create_history(
+                sender,
+                receiver,
+                amount,
                 inscription.ticker.clone(),
-                "send".to_string(),
+                "send".into(),
                 false,
                 inscription.inscription_id.clone(),
                 inscription.inscription_num,
-                inscription.genesis_tx_id.clone(),
-                inscription.height,
-                inscription.timestamp,
-            );
-        }
+                inscription
+                    .spent_tx
+                    .clone()
+                    .ok_or("Missing spending transaction")?,
+                inscription.spent_height.ok_or("Missing spending height")?,
+                inscription
+                    .spent_timestamp
+                    .ok_or("Missing spending timestamp")?,
+            )
+            .map_err(|_| "Cannot record transfer history")?;
+        Ok(())
     }
 }
 

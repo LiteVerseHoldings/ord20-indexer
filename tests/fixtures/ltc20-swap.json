@@ -1,0 +1,69 @@
+{
+  "plan": {
+    "version": 1,
+    "listing_id": "1",
+    "inscription_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai0",
+    "seller_address": "ltc1q0xcqpzrky6eff2g52qdye53xkk9jxkvrnx7nu7",
+    "buyer_address": "ltc1qa0qwuze2h85zw7nqpsj3ga0z9geyrgwp9eraxn",
+    "standard": "ltc20",
+    "token_id": "lite",
+    "amount": "10",
+    "token": {
+      "units": "1000",
+      "available_units": "1001",
+      "rune_id": "3000000:7",
+      "divisibility": 2
+    },
+    "transfer_inscription_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbi0",
+    "inputs": [
+      {
+        "output": "e2743fea476c828142945a833ebd899b94cb7a7c01b0eaefffeb9820d9d817f8:0",
+        "address": "ltc1q0xcqpzrky6eff2g52qdye53xkk9jxkvrnx7nu7",
+        "script": "001479b000887626b294a914501a4cd226b58b235983",
+        "value": "10000",
+        "inscriptions": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai0"
+        ],
+        "runes": []
+      },
+      {
+        "output": "5f40bd5993a36722d587db2ff1ad2efea451f3160f99628fe577fc2bbeb14112:0",
+        "address": "ltc1qa0qwuze2h85zw7nqpsj3ga0z9geyrgwp9eraxn",
+        "script": "0014ebc0ee0b2ab9e8277a600c251475e22a3241a1c1",
+        "value": "10000",
+        "inscriptions": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbi0"
+        ],
+        "runes": []
+      },
+      {
+        "output": "5eea834dfc06b6a19067feae9562ffbec97f2c07b3ca43453aaa10726939dae7:0",
+        "address": "ltc1qa0qwuze2h85zw7nqpsj3ga0z9geyrgwp9eraxn",
+        "script": "0014ebc0ee0b2ab9e8277a600c251475e22a3241a1c1",
+        "value": "100000",
+        "inscriptions": [],
+        "runes": []
+      }
+    ],
+    "fee_rate": 2,
+    "marketplace_fee": "0",
+    "fee_address": null,
+    "outputs": [
+      {
+        "script": "0014ebc0ee0b2ab9e8277a600c251475e22a3241a1c1",
+        "value": "10000"
+      },
+      {
+        "script": "001479b000887626b294a914501a4cd226b58b235983",
+        "value": "10000"
+      },
+      {
+        "script": "0014ebc0ee0b2ab9e8277a600c251475e22a3241a1c1",
+        "value": "99376"
+      }
+    ],
+    "network_fee": "624",
+    "unsigned_tx": "0200000003f817d8d92098ebffefeab0017c7acb949b89bd3e835a944281826c47ea3f74e20000000000ffffffff1241b1be2bfc77e58f62990f16f351a4fe2eadf12fdb87d52267a39359bd405f0000000000ffffffffe7da39697210aa3a4543cab3072c7fc9beff6295aefe6790a1b606fc4d83ea5e0000000000ffffffff031027000000000000160014ebc0ee0b2ab9e8277a600c251475e22a3241a1c1102700000000000016001479b000887626b294a914501a4cd226b58b2359833084010000000000160014ebc0ee0b2ab9e8277a600c251475e22a3241a1c100000000"
+  },
+  "txid": "4a8b84e4f510403f12c410d61c12710382126d63de75bbb4d7b4cdd62de9b196"
+}

@@ -1,15 +1,20 @@
+use crate::checkpoint::{valid_hash, CheckResult};
 use serde::Deserialize;
+use std::time::Duration;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Inscriptions {
     pub inscriptions: Vec<InscriptionItem>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct InscriptionItem {
     pub href: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Inscription {
     pub number: i64,
@@ -43,6 +48,7 @@ pub struct Transaction {
     pub inscriptions: Vec<TransactionInscription>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Block {
     pub hash: String,
@@ -55,6 +61,7 @@ pub struct Block {
     pub weight: i32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Output {
     pub address: String,
@@ -65,17 +72,77 @@ pub struct Output {
 #[derive(Clone)]
 pub struct Ordinals {
     base_url: String,
+    client: reqwest::Client,
 }
 
 impl Ordinals {
     pub(crate) fn new(base_url: String) -> Self {
-        Ordinals { base_url }
+        Ordinals {
+            base_url: format!("{}/", base_url.trim_end_matches('/')),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("Cannot create Ord client"),
+        }
+    }
+
+    pub(crate) async fn verify_chain(&self, minimum_height: i32) -> CheckResult<()> {
+        let value: serde_json::Value = self
+            .client
+            .get(format!("{}status", self.base_url))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| "Ord status unavailable")?
+            .error_for_status()
+            .map_err(|_| "Ord status unavailable")?
+            .json()
+            .await
+            .map_err(|_| "Invalid Ord status")?;
+        if value["chain"].as_str() != Some("mainnet")
+            || value["unrecoverably_reorged"].as_bool() != Some(false)
+            || value["height"]
+                .as_i64()
+                .is_none_or(|height| height < minimum_height as i64)
+            || value["inscriptions"]
+                .as_u64()
+                .is_none_or(|count| count == 0)
+            || value["inscription_index"].as_bool() == Some(false)
+        {
+            return Err("Ord is not a healthy mainnet inscription index".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn get_block_hash(&self, height: i32) -> CheckResult<String> {
+        let value = self
+            .client
+            .get(format!("{}blockhash/{}", self.base_url, height))
+            .send()
+            .await
+            .map_err(|_| "Canonical hash unavailable")?
+            .error_for_status()
+            .map_err(|_| "Canonical hash unavailable")?
+            .text()
+            .await
+            .map_err(|_| "Invalid canonical hash")?;
+        let hash = value.trim().to_string();
+        if !valid_hash(&hash) {
+            return Err("Invalid canonical block hash".into());
+        }
+        Ok(hash)
     }
 
     #[allow(unused)]
     pub(crate) async fn get_status(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!("{}status", self.base_url);
-        let response = reqwest::get(url).await?;
+        let response = self
+            .client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
 
         if response.status().is_success() {
             let content = response.text().await?;
@@ -88,7 +155,7 @@ impl Ordinals {
 
     pub(crate) async fn get_block_height(&mut self) -> Result<i32, Box<dyn std::error::Error>> {
         let url = format!("{}blockheight", self.base_url);
-        let response = reqwest::get(url).await?;
+        let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
             let content = response.text().await?;
@@ -104,7 +171,8 @@ impl Ordinals {
         block_height: i32,
     ) -> Result<Block, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}block/{}", self.base_url, block_height);
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .get(&url)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
@@ -123,7 +191,8 @@ impl Ordinals {
         outpoint: String,
     ) -> Result<Output, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}output/{}", self.base_url, outpoint);
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .get(&url)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
