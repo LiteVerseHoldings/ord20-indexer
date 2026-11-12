@@ -95,8 +95,12 @@ impl Indexer {
             return Err("Another checkpoint writer is active".into());
         }
         // Also excludes writers that do not implement the advisory lock during this block.
-        self.database.connection.batch_execute("LOCK TABLE status, balances, tracker, inscriptions, history IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-            .map_err(|_| "Another ledger writer is active")?;
+        // VACUUM/ANALYZE take a conflicting lock too. Allow short maintenance to
+        // finish rather than treating every collision as another ledger writer.
+        // The existing two-second lock timeout still bounds the wait, and any
+        // failure rolls back the transaction before ledger/checkpoint mutation.
+        self.database.connection.batch_execute("LOCK TABLE status, balances, tracker, inscriptions, history IN SHARE ROW EXCLUSIVE MODE")
+            .map_err(|_| "Ledger writer or maintenance lock did not become available")?;
         Ok(())
     }
 

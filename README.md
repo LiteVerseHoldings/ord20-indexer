@@ -20,6 +20,9 @@ one PostgreSQL transaction. Reorgs, missing required previous-output metadata,
 SQL failures, gaps and panics refuse advancement. Bootstrap only permits an empty
 ledger at the reference activation boundary. A populated uncheckpointed ledger
 is refused; do not seed its marker manually or run this beside the old writer.
+The table writer guard allows up to two seconds for short PostgreSQL maintenance
+locks (such as VACUUM/ANALYZE) to clear. Persistent table contention aborts the
+whole block, and a competing checkpoint writer is still refused immediately.
 Keep the production ledger and prior binary intact. Source verification and an
 audited independent replay remain release gates.
 

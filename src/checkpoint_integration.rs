@@ -474,6 +474,37 @@ async fn concurrent_legacy_writer_is_refused_during_block() {
         .contains("writer"));
     other.batch_execute("ROLLBACK").unwrap();
     assert_eq!(checkpoint(&mut indexer).height, INITIAL_HEIGHT);
+    indexer.commit_block(&empty_block()).await.unwrap();
+    assert_eq!(checkpoint(&mut indexer).height, INITIAL_HEIGHT + 1);
+}
+
+#[tokio::test]
+async fn routine_maintenance_lock_can_finish_before_checkpoint_commit() {
+    let server = MockOrd::new();
+    let (mut indexer, schema) = indexer(&server);
+    indexer.initialize_checkpoint().await.unwrap();
+    let (ready, waiting) = std::sync::mpsc::channel();
+    let maintenance = thread::spawn(move || {
+        let mut other = PgConnection::establish(DATABASE).unwrap();
+        // The same table lock mode used by ordinary VACUUM and ANALYZE.
+        other
+            .batch_execute(&format!(
+            "SET search_path = {schema}; BEGIN; LOCK TABLE tracker IN SHARE UPDATE EXCLUSIVE MODE"
+        ))
+            .unwrap();
+        ready.send(()).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        other.batch_execute("ROLLBACK").unwrap();
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    let result = indexer.commit_block(&empty_block()).await;
+    maintenance.join().unwrap();
+    result.unwrap();
+    assert_eq!(checkpoint(&mut indexer).height, INITIAL_HEIGHT + 1);
+    assert_eq!(
+        indexer.read_checkpoint().unwrap().block_hash,
+        "b".repeat(64)
+    );
 }
 fn swap_block() -> Block {
     let f = fixture();
