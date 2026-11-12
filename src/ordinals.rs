@@ -175,6 +175,10 @@ impl Ordinals {
             .client
             .get(&url)
             .header(reqwest::header::ACCEPT, "application/json")
+            // A historical block feed can include hundreds of inscription
+            // bodies. Keep health/canonical reads fast while bounding this
+            // larger download, including its response body, separately.
+            .timeout(Duration::from_secs(60))
             .send()
             .await?;
 
@@ -268,7 +272,106 @@ impl Ordinals {
 
 #[cfg(test)]
 mod tests {
-    use crate::ordinals::TransactionInscription;
+    use crate::ordinals::{Ordinals, TransactionInscription};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    fn block_response(
+        status: &str,
+        body: String,
+        header_delay: Duration,
+        body_delay: Duration,
+    ) -> (Ordinals, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_owned();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET /block/2489073 HTTP/1.1\r\n"));
+            thread::sleep(header_delay);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(body_delay);
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        let mut ord = Ordinals::new(format!("http://{address}"));
+        // Scale down the ordinary request timeout so the regression stays fast.
+        ord.client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(40))
+            .build()
+            .unwrap();
+        (ord, server)
+    }
+
+    fn valid_block_body() -> String {
+        serde_json::json!({
+            "hash": "a".repeat(64),
+            "height": 2489073,
+            "previous_blockhash": "b".repeat(64),
+            "size": 1000,
+            "target": "c".repeat(64),
+            "timestamp": "2023-01-01T00:00:00Z",
+            "transactions": [],
+            "weight": 4000
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn historical_block_headers_can_exceed_the_normal_request_timeout() {
+        let (mut ord, server) = block_response(
+            "200 OK",
+            valid_block_body(),
+            Duration::from_millis(150),
+            Duration::ZERO,
+        );
+        assert_eq!(ord.get_block(2489073).await.unwrap().height, 2489073);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn historical_block_body_can_exceed_the_normal_request_timeout() {
+        let (mut ord, server) = block_response(
+            "200 OK",
+            valid_block_body(),
+            Duration::ZERO,
+            Duration::from_millis(150),
+        );
+        assert_eq!(ord.get_block(2489073).await.unwrap().height, 2489073);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn historical_block_errors_and_invalid_bodies_still_fail() {
+        for (status, body) in [
+            ("503 Service Unavailable", valid_block_body()),
+            ("404 Not Found", valid_block_body()),
+            ("200 OK", "{}".to_owned()),
+            ("200 OK", "not JSON".to_owned()),
+        ] {
+            let (mut ord, server) = block_response(status, body, Duration::ZERO, Duration::ZERO);
+            assert!(ord.get_block(2489073).await.is_err());
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn test_transaction_inscription_deserialization() {

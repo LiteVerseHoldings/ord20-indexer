@@ -23,6 +23,9 @@ is refused; do not seed its marker manually or run this beside the old writer.
 The table writer guard allows up to two seconds for short PostgreSQL maintenance
 locks (such as VACUUM/ANALYZE) to clear. Persistent table contention aborts the
 whole block, and a competing checkpoint writer is still refused immediately.
+Historical block downloads have a separate 60-second request/body timeout;
+health and canonical-hash requests retain the 10-second client timeout. A failed
+or malformed block response still refuses advancement without skipping a block.
 Keep the production ledger and prior binary intact. Source verification and an
 audited independent replay remain release gates.
 
