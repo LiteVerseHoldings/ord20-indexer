@@ -246,6 +246,86 @@ async fn shadow_replay_matches_organization_ledger_and_corrects_only_send_histor
 }
 
 #[tokio::test]
+async fn duplicate_genesis_output_rejection_preserves_legacy_ledger_and_commits_the_block() {
+    let server = MockOrd::new();
+    let (mut candidate, _) = indexer(&server);
+    let (baseline, _) = indexer(&server);
+    let mut baseline = legacy::LegacyIndexer {
+        database: baseline.database,
+        ordinals: baseline.ordinals,
+        meta_protocol: baseline.meta_protocol,
+    };
+    candidate.initialize_checkpoint().await.unwrap();
+    let mut block = reservation_block();
+    let mint = &mut block.transactions[1];
+    for index in 1..=4 {
+        mint.inscriptions.push(TransactionInscription {
+            inscription_id: format!("{}i{index}", mint.transaction),
+            inscription_number: 3 + index,
+            content_type: Some(hex::encode("application/json")),
+            content: Some(hex::encode(
+                json!({"p":"ltc-20","op":"mint","tick":"lite","amt":"100"}).to_string(),
+            )),
+        });
+    }
+    block.transactions.push(inscription_tx(
+        "f".repeat(64),
+        8,
+        json!({"p":"ltc-20","op":"mint","tick":"lite","amt":"5"}),
+    ));
+    assert_eq!(candidate.commit_block(&block).await.unwrap(), 4);
+    baseline.process_block(&block).await;
+    for table in ["balances", "tracker", "inscriptions", "history"] {
+        assert_eq!(
+            synthetic_rows(&mut candidate.database.connection, table),
+            synthetic_rows(&mut baseline.database.connection, table),
+            "Expected duplicate-output rejection changed the legacy ledger in {table}"
+        );
+    }
+    let buyer = fixture()["plan"]["buyer_address"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let balance = candidate
+        .database
+        .get_balance(buyer, "lite".into())
+        .unwrap();
+    assert_eq!(balance.balance, 15.into());
+    assert_eq!(balance.transfer_balance, 10.into());
+    assert_eq!(
+        candidate
+            .database
+            .get_tracker("lite".into())
+            .unwrap()
+            .supply_minted,
+        25.into()
+    );
+    assert_eq!(checkpoint(&mut candidate).height, INITIAL_HEIGHT + 1);
+}
+
+#[tokio::test]
+async fn duplicate_inscription_identity_on_a_different_output_still_rolls_back() {
+    for duplicate_number in [false, true] {
+        let server = MockOrd::new();
+        let (mut candidate, _) = indexer(&server);
+        candidate.initialize_checkpoint().await.unwrap();
+        let mut block = reservation_block();
+        if duplicate_number {
+            block.transactions[1].inscriptions[0].inscription_number =
+                block.transactions[0].inscriptions[0].inscription_number;
+        } else {
+            block.transactions[1].inscriptions[0].inscription_id =
+                block.transactions[0].inscriptions[0].inscription_id.clone();
+        }
+        assert!(candidate.commit_block(&block).await.is_err());
+        assert_eq!(checkpoint(&mut candidate).height, INITIAL_HEIGHT);
+        for table in ["balances", "tracker", "inscriptions", "history"] {
+            assert!(synthetic_rows(&mut candidate.database.connection, table).is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn genesis_uses_actual_first_output_instead_of_inscription_id_suffix() {
     let server = MockOrd::new();
     let (mut candidate, _) = indexer(&server);

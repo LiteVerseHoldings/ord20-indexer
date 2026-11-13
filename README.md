@@ -26,6 +26,11 @@ whole block, and a competing checkpoint writer is still refused immediately.
 Historical block downloads have a separate 60-second request/body timeout;
 health and canonical-hash requests retain the 10-second client timeout. A failed
 or malformed block response still refuses advancement without skipping a block.
+The organization's existing one-genesis-record-per-output rejection rule is
+preserved with a targeted output-conflict rejection. Additional inscriptions on
+an already-recorded genesis output do not abort the whole block transaction.
+Other SQL failures and inscription identity conflicts on different outputs still
+roll back every ledger mutation and refuse checkpoint advancement.
 Keep the production ledger and prior binary intact. Source verification and an
 audited independent replay remain release gates.
 

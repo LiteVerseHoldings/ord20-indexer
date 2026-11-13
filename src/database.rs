@@ -81,6 +81,12 @@ impl Database {
 
         diesel::insert_into(inscriptions::table)
             .values(&new_inscription)
+            // Preserve the organization's one-genesis-record-per-output rule.
+            // An expected output collision must reject only that inscription,
+            // rather than poison the whole atomic block transaction. Other
+            // SQL/identity errors still abort and roll back the checkpoint.
+            .on_conflict(inscriptions::output)
+            .do_nothing()
             .returning(Inscriptions::as_returning())
             .get_result(&mut self.connection)
     }
