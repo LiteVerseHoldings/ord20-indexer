@@ -16,6 +16,8 @@ pub struct Ord20 {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::schema::status)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+// Queryable rows retain the complete schema even when a consumer reads a subset.
+#[allow(dead_code)]
 pub struct Status {
     pub id: i32,
     pub key: String,
@@ -57,6 +59,7 @@ struct InscriptionsTransferInsert {
 #[derive(Debug, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::inscriptions)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+#[allow(dead_code)] // Preserve the complete database row; do not drop columns.
 pub struct Inscriptions {
     pub id: i32,
     pub genesis_tx_id: String,
@@ -98,6 +101,7 @@ pub struct TrackerInsert {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::schema::tracker)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+#[allow(dead_code)] // Preserve the complete database row; do not drop columns.
 pub struct Tracker {
     pub id: i32,
     pub deploy_inscription_num: i64,
@@ -124,6 +128,7 @@ pub struct BalancesInsert {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::schema::balances)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+#[allow(dead_code)] // Preserve the complete database row; do not drop columns.
 pub struct Balances {
     pub id: i32,
     pub address: String,
@@ -152,6 +157,7 @@ pub struct HistoryInsert {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::schema::history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+#[allow(dead_code)] // Preserve the complete database row; do not drop columns.
 pub struct History {
     pub id: i32,
     pub address_sender: Option<String>,

@@ -73,11 +73,13 @@ impl Checkpoint {
 }
 
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)] // Diesel generates the row constructor.
 struct LockResult {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     acquired: bool,
 }
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)] // Diesel generates the row constructor.
 struct EmptyResult {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     empty: bool,

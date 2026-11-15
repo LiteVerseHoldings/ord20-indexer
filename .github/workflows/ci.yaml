@@ -4,9 +4,14 @@ on:
   push:
     branches:
       - master
+      - 'ci/**'
   pull_request:
     branches:
       - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 defaults:
   run:
@@ -14,57 +19,70 @@ defaults:
 
 env:
   RUSTFLAGS: --deny warnings
+  RUSTUP_TOOLCHAIN: 1.100.0
+  RUSTUP_AUTO_INSTALL: '0'
 
 jobs:
   lint:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Install Rust Toolchain Components
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: clippy, rustfmt
-          override: true
-          toolchain: stable
-
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy --component rustfmt --no-self-update
+      - name: Locate PostgreSQL client libraries
+        run: echo "PQ_LIB_DIR=$(pg_config --libdir)" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
-
       - name: Clippy
-        run: cargo clippy --all --all-targets
-
+        run: cargo clippy --locked --all --all-targets
       - name: Format
         run: cargo fmt --all -- --check
 
   test:
     strategy:
+      fail-fast: false
       matrix:
         os:
           - macos-latest
           - ubuntu-latest
           - windows-latest
-
-    runs-on: ${{matrix.os}}
-
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Install Rust Toolchain Components
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          profile: minimal
-          toolchain: stable
-
-      - name: Install PostgreSQL (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: bash
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy --component rustfmt --no-self-update
+      - name: Locate preinstalled PostgreSQL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          choco install postgresql --version=16 --force --params '/Password:postgres'
-          echo 'C:\Program Files\PostgreSQL\16\bin' >> $GITHUB_PATH
-          echo 'C:\Program Files\PostgreSQL\16\lib' >> $GITHUB_PATH
-
+          $pgRoot = $env:PGROOT
+          if (-not $pgRoot) {
+            $pg = Get-ChildItem -LiteralPath 'C:\Program Files\PostgreSQL' -Directory |
+              Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+            if (-not $pg) { throw 'The runner has no preinstalled PostgreSQL client.' }
+            $pgRoot = $pg.FullName
+          }
+          $pgLib = Join-Path $pgRoot 'lib'
+          if (-not (Test-Path -LiteralPath (Join-Path $pgLib 'libpq.lib'))) {
+            throw 'The preinstalled PostgreSQL client library is missing.'
+          }
+          "PQ_LIB_DIR=$pgLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          (Join-Path $pgRoot 'bin') | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Locate PostgreSQL client libraries (Linux)
+        if: runner.os == 'Linux'
+        run: echo "PQ_LIB_DIR=$(pg_config --libdir)" >> "$GITHUB_ENV"
+      - name: Install PostgreSQL client libraries (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          brew fetch --force-bottle --deps libpq
+          brew install --force-bottle libpq
+          echo "PQ_LIB_DIR=$(brew --prefix libpq)/lib" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
-
       - name: Test
-        run: cargo test --all
+        run: cargo test --locked --all

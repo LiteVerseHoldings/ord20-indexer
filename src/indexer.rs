@@ -76,9 +76,13 @@ impl Indexer {
                 {
                     if inscription.action == "transfer" && !inscription.spent.unwrap_or_default() {
                         if index > 0 {
-                            for backfill_index in (fetched_up_to_index + 1) as usize..index {
-                                let (backfill_input, _) = &txs.inputs[backfill_index];
-
+                            for (backfill_index, (backfill_input, _)) in txs
+                                .inputs
+                                .iter()
+                                .enumerate()
+                                .take(index)
+                                .skip((fetched_up_to_index + 1) as usize)
+                            {
                                 let output = self.ordinals.get_output(backfill_input.to_string()).await
                                     .map_err(|_| "Required prior input value unavailable; cannot locate transfer")?;
                                 if Some(output.transaction.as_str())
