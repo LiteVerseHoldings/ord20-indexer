@@ -1,0 +1,36 @@
+name: Validation operations
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ops/validation/**
+      - .github/workflows/validation-ops.yml
+  pull_request:
+    branches: [master]
+    paths:
+      - ops/validation/**
+      - .github/workflows/validation-ops.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validation-tooling:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show preinstalled Python
+        run: python --version
+      - name: Check minimum Python syntax
+        run: python -I -B -c "import ast,pathlib; [ast.parse(p.read_text(),feature_version=(3,9)) for p in pathlib.Path('ops/validation').rglob('*.py')]"
+      - name: Run isolated loopback tests
+        run: python -I -B -m unittest discover -s ops/validation/tests -v

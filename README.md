@@ -55,6 +55,14 @@ mainnet-ready checkpoint. Full historical mainnet replay/reconciliation, live
 build provenance and the hosted purchase flow with the packaged wallet remain
 release gates. Nothing was deployed, restarted or deleted by this work.
 
+## Isolated replay operations
+
+[Bounded replay tooling](ops/validation/README.md) provides an optional loopback
+Ord reader with configurable request limits, a fixed height ceiling, sequential
+forwarding and an opt-in health/rollback watchdog. Its examples and tests are
+separate from native indexer builds and release gates; adding them does not
+deploy a service or change application indexing behavior.
+
 <!-- PROJECT LOGO -->
 <div align="center">
   <h3 align="center">Ord20 Indexer (ord-20) library</h3>

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "upstream": "http://127.0.0.1:8080",
+  "height_limit": 3000000,
+  "requests_per_second": 10,
+  "listen_port": 18080,
+  "max_response_bytes": 67108864
+}

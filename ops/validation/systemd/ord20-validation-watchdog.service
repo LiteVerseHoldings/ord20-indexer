@@ -1,0 +1,30 @@
+[Unit]
+Description=Opt-in rollback monitor for the isolated Ord validation reader
+BindsTo=ord20-validation-reader.service
+After=ord20-validation-reader.service
+
+[Service]
+Type=simple
+User=root
+Group=ord20-validation
+ExecStart=/usr/bin/python3 -I -B /opt/ord20-validation/ord_replay.py watch --config /etc/ord20-validation/reader.json --reader-state /var/lib/ord20-validation/reader-stats.json --fallback-rps 10 --fallback-cpu-percent 50 --apply
+UMask=0027
+CPUQuota=10%
+MemoryMax=128M
+TasksMax=16
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/etc/ord20-validation
+ReadOnlyPaths=/var/lib/ord20-validation
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

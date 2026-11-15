@@ -1,0 +1,30 @@
+[Unit]
+Description=Bounded read-only Ord input for isolated LTC-20 validation
+After=network.target
+
+[Service]
+Type=simple
+User=ord20-validation
+Group=ord20-validation
+ExecStart=/usr/bin/python3 -I -B /opt/ord20-validation/ord_replay.py serve --config /etc/ord20-validation/reader.json --state-dir /var/lib/ord20-validation
+StateDirectory=ord20-validation
+StateDirectoryMode=0750
+UMask=0027
+CPUQuota=50%
+MemoryMax=512M
+TasksMax=16
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/ord20-validation
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
