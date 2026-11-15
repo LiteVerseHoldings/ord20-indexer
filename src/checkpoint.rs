@@ -72,18 +72,24 @@ impl Checkpoint {
     }
 }
 
-#[derive(QueryableByName)]
-#[allow(clippy::redundant_field_names)] // Diesel generates the row constructor.
-struct LockResult {
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    acquired: bool,
+// Diesel emits constructor impls outside each input struct's lint scope. Keep
+// this generated-code exception confined to the two SQL result representations.
+#[allow(clippy::redundant_field_names)]
+mod query_results {
+    #[derive(diesel::QueryableByName)]
+    pub(super) struct LockResult {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        pub(super) acquired: bool,
+    }
+
+    #[derive(diesel::QueryableByName)]
+    pub(super) struct EmptyResult {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        pub(super) empty: bool,
+    }
 }
-#[derive(QueryableByName)]
-#[allow(clippy::redundant_field_names)] // Diesel generates the row constructor.
-struct EmptyResult {
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    empty: bool,
-}
+
+use query_results::{EmptyResult, LockResult};
 
 impl Indexer {
     fn begin_checkpoint(&mut self) -> CheckResult<()> {
