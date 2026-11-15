@@ -30,6 +30,12 @@ the ignored `local/` directory, outside Git.
 | Other failures | Missing, malformed, wrong-height, unhealthy-chain and reorg responses fail closed |
 | CPU allowance | Example systemd unit: 50%, meaning half of one logical core |
 
+The request setting is a **ceiling on request starts**, including retries, not a
+target request volume or a blocks/second setting. The configurable maximum of
+100 is a software guardrail, not a measured capacity guarantee. With one request
+in flight, response handling, upstream latency, native ledger processing and
+database commits can keep actual traffic well below the configured ceiling.
+
 Only GET `/status`, `/blockheight`, numeric `/blockhash/H`, numeric `/block/H`
 and well-formed `/output/TXID:VOUT` routes are forwarded. Block and hash requests
 above the ceiling are rejected **before upstream access**. Write methods and
@@ -43,6 +49,25 @@ and increasing the ceiling therefore require no reader or producer restart.
 Changing the upstream/listener or lowering a ceiling while running fails closed.
 An optional `--resource-guard PATH` accepts an operator-owned JSON status file
 whose truthy `stop_reason` blocks reads; publish this file atomically.
+
+## LTC-20 request pattern
+
+The checkpoint producer reads the following Ord endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/block/H` | Block identity, transactions, outputs and inscription data for the next block |
+| `/status` | Mainnet, inscription-index and reorg health |
+| `/blockhash/H` | Canonical identity of the previous and proposed checkpoints |
+| `/output/TXID:VOUT` | Previous-input identity and value needed to locate some transfer inscriptions in transactions with multiple inputs |
+| `/blockheight` | Available source height, bounded by the replay ceiling |
+
+In the current checkpoint path, a block fetch is followed by four canonical
+checks: previous and proposed checkpoints, before and after processing. Each
+canonical check reads `/status` and `/blockhash/H`. That makes **nine Ord reads
+per typical committed block**, with additional height polls, previous-output
+lookups or transport retries when needed. Bootstrap also performs source checks.
+Do not remove these checks or skip output lookups to reach a request-rate target.
 
 ## Inspect, run and tune
 
@@ -144,14 +169,22 @@ production service and private inscriber independent of this helper.
 
 ## Measured comparison-replay throughput
 
-Short sequential mainnet replay samples measured the following configurations:
+Short sequential mainnet replay samples measured the following configurations.
+These observations came from the bounded reader that preceded this portable
+tool; benchmark the reader and workload actually deployed in each environment.
 
 | Change | Reader CPU allowance | Baseline blocks/hour | Trial blocks/hour | Observed ratio |
 | --- | --- | ---: | ---: | ---: |
 | 10 to 20 requests/second | Half core throughout | 3,993 | 7,448 | 1.86x |
 | 20 to 30 requests/second | Half core to one core | 7,284 | 10,842 | 1.49x |
+| 30 to 40 requests/second | One core throughout | 10,210 | 13,359 | 1.31x |
+| 40 to 50 requests/second | One core throughout | 13,613 | 15,934 | 1.17x |
+| 50 to 75 requests/second | One core throughout | 16,003 | 16,520 | 1.03x |
+| 50 to 100 requests/second | One core throughout | 15,463 | 16,293 | 1.05x |
 
-Each baseline lasted about 60 seconds; each trial lasted about 180 seconds.
+Each baseline lasted about 60 seconds. The 75-request trial lasted about 120
+seconds; the other trials lasted about 180 seconds. Each row uses a fresh
+baseline and a different block range.
 The 30-request trial changed **both** pacing and the reader's CPU allowance.
 Block composition varied, so these are combined configuration observations,
 not an isolated algorithm benchmark or a throughput guarantee. Native indexer
@@ -160,10 +193,36 @@ unchanged. No fetch errors/retries occurred in these trial windows; the preserve
 checkpoint was checked against the canonical chain. Full historical ledger
 reconciliation was still pending when these samples were taken.
 
+The 100-request ceiling produced **40.72 actual requests/second**, compared with
+38.79 in its 50-request baseline. Its 5.4% throughput gain was below that trial's
+preselected 10% retention threshold, so the job returned to 50. The 75-request
+trial also returned to 50 after a 3.2% gain. Both trials passed their production
+health checks; the reversions were performance decisions. These short samples
+suggest that raising the ceiling alone had little benefit in those block ranges.
+They do not identify a single bottleneck or establish a universal safe limit.
+
+That job retained a 50-request profile with a known-good 40-request fallback.
+The portable example remains at 10; choose a profile from measurements of the
+actual environment rather than copying the retained rate from this example.
+
 For each new environment, measure committed blocks/hour, actual request rate,
 reader CPU throttling, upstream latency/lag, errors and memory/disk headroom.
 Preserve a known-good fallback and accept an increase only after the observation
 window passes. Never infer final trade correctness from a faster relay.
+
+For a tuning trial:
+
+1. Record a healthy baseline and the current canonical checkpoint. Preserve the
+   live height ceiling and a known-good fallback rate/CPU allowance.
+2. Change one allowance at a time and keep concurrency at one. State the minimum
+   useful speed gain and production health limits before measuring the change.
+3. Observe several minutes of representative blocks. Compare committed
+   blocks/hour and actual traffic, alongside CPU throttling, upstream latency
+   and lag, fetch errors/retries, and resource headroom. Recheck longer-term
+   stability after retaining a profile.
+4. Restore the known-good profile if health degrades or the gain is too small.
+   Review and re-arm the portable watchdog after its rollback; it supports one
+   fallback per run and does not implement the private job's multi-step policy.
 
 ## Tests
 

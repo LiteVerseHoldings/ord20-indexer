@@ -63,6 +63,11 @@ forwarding and an opt-in health/rollback watchdog. Its examples and tests are
 separate from native indexer builds and release gates; adding them does not
 deploy a service or change application indexing behavior.
 
+The request limit caps request starts; it does not predict actual request rate
+or committed blocks/hour. Read the [request pattern and tuning measurements](ops/validation/README.md#ltc-20-request-pattern)
+before raising it. Short replay trials showed diminishing gains above a
+50-request profile, with workload-specific results documented in that guide.
+
 <!-- PROJECT LOGO -->
 <div align="center">
   <h3 align="center">Ord20 Indexer (ord-20) library</h3>
