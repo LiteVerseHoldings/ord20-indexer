@@ -389,6 +389,504 @@ fn reservation_block() -> Block {
 }
 
 #[tokio::test]
+async fn mint_counts_a_zero_balance_account_as_a_holder_again() {
+    let server = MockOrd::new();
+    let (mut indexer, _) = indexer(&server);
+    indexer.initialize_checkpoint().await.unwrap();
+    let mut initial = reservation_block();
+    initial.transactions.pop();
+    indexer.commit_block(&initial).await.unwrap();
+    let f = fixture();
+    let buyer = f["plan"]["buyer_address"].as_str().unwrap().to_string();
+    let seller = f["plan"]["seller_address"].as_str().unwrap().to_string();
+
+    // Reserve the full balance, then spend it to a different holder.
+    let mut reserve = empty_block();
+    reserve.height = INITIAL_HEIGHT + 2;
+    reserve.previous_blockhash = "b".repeat(64);
+    reserve.hash = "c".repeat(64);
+    let txid = f["plan"]["inputs"][1]["output"]
+        .as_str()
+        .unwrap()
+        .split(':')
+        .next()
+        .unwrap()
+        .to_string();
+    reserve.transactions.push(inscription_tx(
+        txid,
+        3,
+        json!({"p":"ltc-20","op":"transfer","tick":"lite","amt":"20"}),
+    ));
+    server.responses.lock().unwrap().routes.insert(
+        format!("/blockhash/{}", reserve.height),
+        (200, reserve.hash.clone()),
+    );
+    indexer.commit_block(&reserve).await.unwrap();
+    assert_eq!(
+        indexer.database.get_tracker("lite".into()).unwrap().holders,
+        1
+    );
+    let nft = f["plan"]["inputs"][0]["output"].as_str().unwrap();
+    server.route(
+        format!("/output/{nft}"),
+        json!({"address":seller,
+        "transaction":nft.split(':').next().unwrap(),"value":10000}),
+    );
+    let mut spend = swap_block();
+    spend.height = INITIAL_HEIGHT + 3;
+    spend.previous_blockhash = "c".repeat(64);
+    spend.hash = "d".repeat(64);
+    server.responses.lock().unwrap().routes.insert(
+        format!("/blockhash/{}", spend.height),
+        (200, spend.hash.clone()),
+    );
+    indexer.commit_block(&spend).await.unwrap();
+    let empty = indexer
+        .database
+        .get_balance(buyer.clone(), "lite".into())
+        .unwrap();
+    assert_eq!(empty.balance, 0.into());
+    assert_eq!(empty.transfer_balance, 0.into());
+    assert_eq!(
+        indexer.database.get_tracker("lite".into()).unwrap().holders,
+        1
+    );
+
+    let mut remint = empty_block();
+    remint.height = INITIAL_HEIGHT + 4;
+    remint.previous_blockhash = "d".repeat(64);
+    remint.hash = "e".repeat(64);
+    remint.transactions.push(inscription_tx(
+        "f".repeat(64),
+        4,
+        json!({"p":"ltc-20","op":"mint","tick":"lite","amt":"5"}),
+    ));
+    server.responses.lock().unwrap().routes.insert(
+        format!("/blockhash/{}", remint.height),
+        (200, remint.hash.clone()),
+    );
+    let before: Vec<_> = ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .map(|table| synthetic_rows(&mut indexer.database.connection, table))
+        .collect();
+    indexer.database.connection.batch_execute(
+        "ALTER TABLE history ADD CONSTRAINT synthetic_remint_failure CHECK (action <> 'mint') NOT VALID"
+    ).unwrap();
+    assert!(indexer.commit_block(&remint).await.is_err());
+    assert_eq!(checkpoint(&mut indexer).height, spend.height);
+    for (table, expected) in ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .zip(before)
+    {
+        assert_eq!(
+            synthetic_rows(&mut indexer.database.connection, table),
+            expected,
+            "A failed remint must roll back holder bookkeeping and every ledger mutation"
+        );
+    }
+    indexer
+        .database
+        .connection
+        .batch_execute("ALTER TABLE history DROP CONSTRAINT synthetic_remint_failure")
+        .unwrap();
+    indexer.commit_block(&remint).await.unwrap();
+    assert_eq!(
+        indexer
+            .database
+            .get_balance(buyer, "lite".into())
+            .unwrap()
+            .balance,
+        5.into()
+    );
+    assert_eq!(
+        indexer
+            .database
+            .get_balance(seller, "lite".into())
+            .unwrap()
+            .balance,
+        20.into()
+    );
+    let tracker = indexer.database.get_tracker("lite".into()).unwrap();
+    assert_eq!(tracker.supply_minted, 25.into());
+    assert_eq!(
+        tracker.holders, 2,
+        "A positive mint restores ownership to an existing zero account"
+    );
+    assert_eq!(checkpoint(&mut indexer).height, remint.height);
+}
+
+#[tokio::test]
+async fn mint_does_not_double_count_available_or_reserved_holders() {
+    for (reserved, new_recipient) in [
+        (None, false),
+        (Some(10), false),
+        (Some(20), false),
+        (None, true),
+    ] {
+        let server = MockOrd::new();
+        let (mut indexer, _) = indexer(&server);
+        indexer.initialize_checkpoint().await.unwrap();
+        let mut initial = reservation_block();
+        if let Some(amount) = reserved {
+            initial.transactions[2].inscriptions[0].content = Some(hex::encode(
+                json!({"p":"ltc-20","op":"transfer","tick":"lite","amt":amount.to_string()})
+                    .to_string(),
+            ));
+        } else {
+            initial.transactions.pop();
+        }
+        indexer.commit_block(&initial).await.unwrap();
+        let f = fixture();
+        let buyer = f["plan"]["buyer_address"].as_str().unwrap().to_string();
+        let recipient = f["plan"][if new_recipient {
+            "seller_address"
+        } else {
+            "buyer_address"
+        }]
+        .as_str()
+        .unwrap()
+        .to_string();
+        let mut mint = empty_block();
+        mint.height = INITIAL_HEIGHT + 2;
+        mint.previous_blockhash = "b".repeat(64);
+        mint.hash = "c".repeat(64);
+        for (txid, number) in [("f".repeat(64), 4), ("1".repeat(64), 5)] {
+            let mut tx = inscription_tx(
+                txid,
+                number,
+                json!({"p":"ltc-20","op":"mint","tick":"lite","amt":"5"}),
+            );
+            tx.output_addresses[0] = recipient.clone();
+            mint.transactions.push(tx);
+        }
+        server.responses.lock().unwrap().routes.insert(
+            format!("/blockhash/{}", mint.height),
+            (200, mint.hash.clone()),
+        );
+        indexer.commit_block(&mint).await.unwrap();
+        let tracker = indexer.database.get_tracker("lite".into()).unwrap();
+        assert_eq!(tracker.holders, if new_recipient { 2 } else { 1 });
+        assert_eq!(tracker.supply_minted, 30.into());
+        let balance = indexer
+            .database
+            .get_balance(recipient, "lite".into())
+            .unwrap();
+        assert_eq!(
+            balance.balance,
+            (if new_recipient {
+                10
+            } else {
+                30 - reserved.unwrap_or(0)
+            })
+            .into()
+        );
+        assert_eq!(
+            indexer
+                .database
+                .get_balance(buyer, "lite".into())
+                .unwrap()
+                .transfer_balance,
+            reserved.unwrap_or(0).into()
+        );
+    }
+}
+
+fn recount(schema: &str, expected: Option<&Checkpoint>) -> std::process::Output {
+    let mut command = std::process::Command::new("psql");
+    command.args([
+        "-X",
+        "-A",
+        "-t",
+        "-q",
+        "-h",
+        "/tmp/token-trade-pg",
+        "-p",
+        "55432",
+        "-U",
+        "postgres",
+        "-d",
+        "token_trade_tests",
+        "-f",
+        "ops/validation/recount_holders.sql",
+    ]);
+    command.env("PGOPTIONS", format!("-c search_path={schema}"));
+    if let Some(checkpoint) = expected {
+        command.args([
+            "-v",
+            "apply=true",
+            "-v",
+            &format!("expected_height={}", checkpoint.height),
+            "-v",
+            &format!("expected_hash={}", checkpoint.block_hash),
+        ]);
+    }
+    command.output().unwrap()
+}
+
+#[tokio::test]
+async fn holder_recount_is_read_only_by_default_and_repairs_only_the_cached_counts() {
+    let server = MockOrd::new();
+    let (mut indexer, schema) = indexer(&server);
+    indexer.initialize_checkpoint().await.unwrap();
+    let mut reserve = reservation_block();
+    reserve.transactions[2].inscriptions[0].content = Some(hex::encode(
+        json!({"p":"ltc-20","op":"transfer","tick":"lite","amt":"20"}).to_string(),
+    ));
+    indexer.commit_block(&reserve).await.unwrap();
+    indexer.database.create_tracker(
+        "none".into(),
+        format!("{}i0", "1".repeat(64)),
+        4,
+        1000.into(),
+        100.into(),
+        2,
+    );
+    indexer
+        .database
+        .create_balance("synthetic-zero-account".into(), "lite".into())
+        .unwrap();
+    indexer
+        .database
+        .connection
+        .batch_execute("UPDATE tracker SET holders=99")
+        .unwrap();
+    let before: Vec<_> = ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .map(|table| synthetic_rows(&mut indexer.database.connection, table))
+        .collect();
+    let checkpoint_before = checkpoint(&mut indexer);
+    let audit = recount(&schema, None);
+    assert!(audit.status.success());
+    let summary: Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(summary["holder_count_mismatches"], 2);
+    for (table, expected) in ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .zip(&before)
+    {
+        assert_eq!(
+            &synthetic_rows(&mut indexer.database.connection, table),
+            expected
+        );
+    }
+    for wrong_height in [false, true] {
+        let mut wrong = checkpoint_before.clone();
+        if wrong_height {
+            wrong.height += 1;
+        } else {
+            wrong.block_hash = "f".repeat(64);
+        }
+        assert!(!recount(&schema, Some(&wrong)).status.success());
+        assert_eq!(
+            synthetic_rows(&mut indexer.database.connection, "tracker"),
+            before[1]
+        );
+    }
+    let checkpoint_text = indexer
+        .database
+        .get_status(CHECKPOINT_KEY.into())
+        .unwrap()
+        .value
+        .unwrap();
+    for (field, value) in [
+        ("ready", json!("true")),
+        ("version", json!("1")),
+        ("height", json!(checkpoint_before.height.to_string())),
+    ] {
+        let mut malformed: Value = serde_json::from_str(&checkpoint_text).unwrap();
+        malformed[field] = value;
+        indexer
+            .database
+            .update_status(CHECKPOINT_KEY.into(), malformed.to_string())
+            .unwrap();
+        assert!(!recount(&schema, Some(&checkpoint_before)).status.success());
+        assert_eq!(
+            synthetic_rows(&mut indexer.database.connection, "tracker"),
+            before[1]
+        );
+    }
+    indexer
+        .database
+        .update_status(CHECKPOINT_KEY.into(), checkpoint_text)
+        .unwrap();
+    let mut competing = PgConnection::establish(DATABASE).unwrap();
+    competing
+        .batch_execute(&format!(
+            "SET search_path={schema}; BEGIN; LOCK TABLE tracker IN ROW EXCLUSIVE MODE"
+        ))
+        .unwrap();
+    assert!(!recount(&schema, Some(&checkpoint_before)).status.success());
+    competing.batch_execute("ROLLBACK").unwrap();
+    let repaired = recount(&schema, Some(&checkpoint_before));
+    assert!(repaired.status.success());
+    let summary: Value = serde_json::from_slice(&repaired.stdout).unwrap();
+    assert_eq!(summary["holder_count_mismatches"], 0);
+    assert_eq!(summary["holder_rows_updated"], 2);
+    assert_eq!(summary["other_ledger_writes"], 0);
+    assert_eq!(
+        indexer.database.get_tracker("lite".into()).unwrap().holders,
+        1
+    );
+    assert_eq!(
+        indexer.database.get_tracker("none".into()).unwrap().holders,
+        0
+    );
+    for (table, expected) in ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .zip(before)
+    {
+        let mut after = synthetic_rows(&mut indexer.database.connection, table);
+        let mut expected = expected;
+        if *table == "tracker" {
+            for row in after.iter_mut().chain(expected.iter_mut()) {
+                row.as_object_mut().unwrap().remove("holders");
+            }
+        }
+        assert_eq!(
+            after, expected,
+            "Recount changed fields outside the holder cache"
+        );
+    }
+    assert_eq!(checkpoint(&mut indexer), checkpoint_before);
+    let (mut legacy, legacy_schema) = self::indexer(&server);
+    assert!(!recount(&legacy_schema, Some(&checkpoint_before))
+        .status
+        .success());
+    assert!(synthetic_rows(&mut legacy.database.connection, "tracker").is_empty());
+    let (mut triggered, triggered_schema) = self::indexer(&server);
+    triggered.initialize_checkpoint().await.unwrap();
+    triggered.commit_block(&reservation_block()).await.unwrap();
+    triggered
+        .database
+        .connection
+        .batch_execute(
+            "UPDATE tracker SET holders=99; \
+         CREATE FUNCTION synthetic_unwanted_write() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN UPDATE balances SET balance=balance+1; RETURN NEW; END $$; \
+         CREATE TRIGGER synthetic_unwanted_write AFTER UPDATE ON tracker \
+         FOR EACH ROW EXECUTE FUNCTION synthetic_unwanted_write()",
+        )
+        .unwrap();
+    let triggered_checkpoint = checkpoint(&mut triggered);
+    let before: Vec<_> = ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .map(|table| synthetic_rows(&mut triggered.database.connection, table))
+        .collect();
+    assert!(!recount(&triggered_schema, Some(&triggered_checkpoint))
+        .status
+        .success());
+    for (table, expected) in ["balances", "tracker", "inscriptions", "history"]
+        .iter()
+        .zip(before)
+    {
+        assert_eq!(
+            synthetic_rows(&mut triggered.database.connection, table),
+            expected,
+            "An unexpected trigger must roll back the entire recount"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_protocol_and_duplicate_output_selection_reserve_and_spend_only_once() {
+    for leading_non_protocol in [false, true] {
+        let server = MockOrd::new();
+        let (mut indexer, schema) = indexer(&server);
+        indexer.initialize_checkpoint().await.unwrap();
+        let mut reserve = reservation_block();
+        let transfer = reserve.transactions.last_mut().unwrap();
+        let first_index = if leading_non_protocol { 1 } else { 0 };
+        let chosen_id = format!("{}i{first_index}", transfer.transaction);
+        let last_id = format!("{}i{}", transfer.transaction, first_index + 1);
+        if leading_non_protocol {
+            transfer.inscriptions[0].content = Some(hex::encode(
+                json!({"p":"prefix-ltc-20-suffix","op":"transfer","tick":"lite","amt":"10"})
+                    .to_string(),
+            ));
+        }
+        for index in first_index..=first_index + 1 {
+            if index == 0 {
+                continue;
+            }
+            transfer.inscriptions.push(TransactionInscription {
+                inscription_id: format!("{}i{index}", transfer.transaction),
+                inscription_number: 3 + index,
+                content_type: Some(hex::encode("application/json")),
+                content: Some(hex::encode(
+                    json!({"p":"ltc-20","op":"transfer","tick":"lite","amt":"10"}).to_string(),
+                )),
+            });
+        }
+        assert_eq!(indexer.commit_block(&reserve).await.unwrap(), 3);
+        let f = fixture();
+        let output = f["plan"]["inputs"][1]["output"].as_str().unwrap();
+        let record = indexer
+            .database
+            .get_inscription_by_output(output.into())
+            .unwrap();
+        assert_eq!(record.inscription_id, chosen_id);
+        assert_eq!(record.valid, Some(true));
+        let buyer = f["plan"]["buyer_address"].as_str().unwrap().to_string();
+        let balance = indexer
+            .database
+            .get_balance(buyer.clone(), "lite".into())
+            .unwrap();
+        assert_eq!(balance.balance, 10.into());
+        assert_eq!(balance.transfer_balance, 10.into());
+        assert!(
+            !synthetic_rows(&mut indexer.database.connection, "inscriptions")
+                .iter()
+                .any(|r| r["inscription_id"] == last_id)
+        );
+        assert!(std::process::Command::new("php")
+            .args(["tests/consume-selection.php", &schema, &chosen_id, &last_id])
+            .status()
+            .unwrap()
+            .success());
+        let nft = f["plan"]["inputs"][0]["output"].as_str().unwrap();
+        server.route(
+            format!("/output/{nft}"),
+            json!({"address":f["plan"]["seller_address"],
+            "transaction":nft.split(':').next().unwrap(),"value":10000}),
+        );
+        let mut swap = swap_block();
+        swap.height = INITIAL_HEIGHT + 2;
+        swap.previous_blockhash = "b".repeat(64);
+        swap.hash = "c".repeat(64);
+        server.responses.lock().unwrap().routes.insert(
+            format!("/blockhash/{}", swap.height),
+            (200, swap.hash.clone()),
+        );
+        indexer.commit_block(&swap).await.unwrap();
+        assert_eq!(
+            indexer
+                .database
+                .get_balance(buyer, "lite".into())
+                .unwrap()
+                .transfer_balance,
+            0.into()
+        );
+        assert_eq!(
+            indexer
+                .database
+                .get_balance(
+                    f["plan"]["seller_address"].as_str().unwrap().into(),
+                    "lite".into()
+                )
+                .unwrap()
+                .balance,
+            10.into()
+        );
+        let receipts: Vec<_> = synthetic_rows(&mut indexer.database.connection, "history")
+            .into_iter()
+            .filter(|r| r["action"] == "send")
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["inscription_id"], chosen_id);
+        assert_eq!(receipts[0]["tx_id"], f["txid"]);
+    }
+}
+
+#[tokio::test]
 async fn native_deploy_mint_transfer_reservation_then_swap() {
     let server = MockOrd::new();
     let (mut indexer, _) = indexer(&server);

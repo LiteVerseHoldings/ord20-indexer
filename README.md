@@ -31,6 +31,9 @@ preserved with a targeted output-conflict rejection. Additional inscriptions on
 an already-recorded genesis output do not abort the whole block transaction.
 Other SQL failures and inscription identity conflicts on different outputs still
 roll back every ledger mutation and refuse checkpoint advancement.
+Minting into an existing account whose available and reserved balances are both
+zero restores its holder count. Accounts with available or reserved tokens are
+already holders and are counted once.
 Keep the production ledger and prior binary intact. Source verification and an
 audited independent replay remain release gates.
 
@@ -56,6 +59,15 @@ build provenance and the hosted purchase flow with the packaged wallet remain
 release gates. Nothing was deployed, restarted or deleted by this work.
 
 ## Isolated replay operations
+
+`ops/validation/recount_holders.sql` audits cached holder counts in a read-only
+transaction by default. For an approved maintenance window with the fixed writer,
+pass `psql -X -v apply=true -v expected_height=HEIGHT -v expected_hash=HASH -f
+ops/validation/recount_holders.sql`. Connection settings remain in local PostgreSQL
+configuration. Applying the recount requires the exact existing native checkpoint
+and bounded writer locks; it updates only `tracker.holders`. It does not create a
+checkpoint, change balances or repair other historical accounting differences.
+No recount or deployment happens automatically when this source is installed.
 
 [Bounded replay tooling](ops/validation/README.md) provides an optional loopback
 Ord reader with configurable request limits, a fixed height ceiling, sequential

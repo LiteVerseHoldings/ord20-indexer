@@ -317,6 +317,13 @@ impl Indexer {
                         .database
                         .get_balance(inscription.genesis_address.clone(), ticker.ticker.clone())
                     {
+                        if account.balance == BigDecimal::zero()
+                            && account.transfer_balance == BigDecimal::zero()
+                        {
+                            let _ = self
+                                .database
+                                .update_tracker_holders(ticker.id, ticker.holders + 1);
+                        }
                         mint_balance = account.balance + mint_balance.clone();
                         transfer_balance = account.transfer_balance + transfer_balance;
                     } else {
